@@ -1,24 +1,41 @@
 import pandas as pd
-import numpy as np
 
 
-class EqualWeightPortfolio:
-    def allocate(self, selected: list[str], date: pd.Timestamp, data: dict[str, pd.DataFrame]) -> dict[str, float]:
+class BasePortfolio:
+    def allocate(self, selected: list[str], date: str, data: dict) -> dict[str, float]:
+        raise NotImplementedError
+
+
+class EqualWeightPortfolio(BasePortfolio):
+    def allocate(self, selected: list[str], date: str, data: dict) -> dict[str, float]:
         if not selected:
             return {}
         weight = 1.0 / len(selected)
-        return {s: weight for s in selected}
+        return {s: round(weight, 6) for s in selected}
 
 
-class MarketCapWeightPortfolio:
-    def allocate(self, selected: list[str], date: pd.Timestamp, data: dict[str, pd.DataFrame]) -> dict[str, float]:
+class MarketCapWeightPortfolio(BasePortfolio):
+    def allocate(self, selected: list[str], date: str, data: dict) -> dict[str, float]:
         if not selected:
             return {}
-        volumes = {}
+        caps = {}
         for s in selected:
-            if s in data and date in data[s].index:
-                volumes[s] = data[s].loc[date, "volume"]
-        total = sum(volumes.values())
-        if total == 0:
-            return {s: 1.0 / len(selected) for s in selected}
-        return {s: v / total for s, v in volumes.items()}
+            if s in data:
+                cap = data[s].get("total_mv", 0) or data[s].get("circ_mv", 0)
+                if cap and cap > 0:
+                    caps[s] = cap
+        if not caps:
+            return EqualWeightPortfolio().allocate(selected, date, data)
+        total = sum(caps.values())
+        return {s: round(v / total, 6) for s, v in caps.items()}
+
+
+PORTFOLIO_MAP = {
+    "equal_weight": EqualWeightPortfolio,
+    "market_cap_weight": MarketCapWeightPortfolio,
+}
+
+
+def get_portfolio(method: str = "market_cap_weight") -> BasePortfolio:
+    cls = PORTFOLIO_MAP.get(method, MarketCapWeightPortfolio)
+    return cls()

@@ -1,14 +1,15 @@
 import json
 from pathlib import Path
+from datetime import datetime
 import pandas as pd
 import numpy as np
 
-from app.data.fetcher import get_multi_stock_history, get_index_history
-from app.strategy.strategy import BaseStrategy, MomentumStrategy
-from app.portfolio.portfolio import EqualWeightPortfolio
-from app.report.reporter import ReportGenerator
-
-CONFIG_PATH = Path(__file__).parent.parent / "config" / "config.json"
+from app.core.config import CONFIG_PATH
+from app.strategy.screener import screen_stocks, get_holdings_detail
+from app.portfolio.portfolio import get_portfolio, BasePortfolio
+from app.data.fetcher import (
+    get_daily_batch, get_index_daily, get_rebalance_dates, get_fundamental_all
+)
 
 
 class BacktestEngine:
@@ -17,63 +18,134 @@ class BacktestEngine:
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                 config = json.load(f)
         self.config = config
-        self.initial_capital = config.get("initial_capital", 1_000_000)
+        self.initial_capital = config.get("initial_capital", 10000)
         self.commission_rate = config.get("commission_rate", 0.0003)
-        self.slippage = config.get("slippage", 0.001)
-        self.rebalance_freq = config.get("rebalance_freq", "M")
+        self.benchmark_code = config.get("benchmark", "000300")
 
     def run(
         self,
-        symbols: list[str],
-        strategy: BaseStrategy,
-        start: str,
-        end: str,
-        benchmark: str = "000300",
-    ) -> pd.DataFrame:
-        print(f"加载数据: {len(symbols)} 只股票, {start} ~ {end}")
-        data = get_multi_stock_history(symbols, start.replace("-", ""), end.replace("-", ""))
+        filters: list[dict],
+        start_date: str,
+        end_date: str,
+        rebalance_freq: str = "M",
+        portfolio_method: str = "market_cap_weight",
+    ) -> dict:
+        portfolio = get_portfolio(portfolio_method)
+        start_fmt = start_date.replace("-", "")
+        end_fmt = end_date.replace("-", "")
 
-        all_dates = set()
-        for df in data.values():
-            all_dates.update(df.index)
-        all_dates = sorted(all_dates)
-        start_dt = pd.Timestamp(start)
-        end_dt = pd.Timestamp(end)
-        all_dates = [d for d in all_dates if start_dt <= d <= end_dt]
+        rebalance_dates = get_rebalance_dates(start_fmt, end_fmt, rebalance_freq)
+        if not rebalance_dates:
+            return {"error": "No trading days found in range"}
 
-        portfolio = EqualWeightPortfolio()
-        cash = self.initial_capital
+        benchmark_df = get_index_daily(
+            f"{self.benchmark_code}.SSE" if self.benchmark_code.startswith("0") else self.benchmark_code,
+            start_fmt, end_fmt
+        )
+        if benchmark_df.empty:
+            benchmark_df = get_index_daily(f"{self.benchmark_code}.SZSE", start_fmt, end_fmt)
+
+        all_symbols = set()
+        holdings_by_date: dict[str, dict] = {}
+        weights_by_date: dict[str, dict] = {}
+
+        for rd in rebalance_dates:
+            selected = screen_stocks(filters, rd)
+            if not selected:
+                continue
+            all_symbols.update(selected)
+            fund_df = get_fundamental_all(rd)
+            cap_data = {}
+            if not fund_df.empty:
+                for _, row in fund_df[fund_df["ts_code"].isin(selected)].iterrows():
+                    cap_data[row["ts_code"]] = {"total_mv": row.get("total_mv", 0), "circ_mv": row.get("circ_mv", 0)}
+            weights = portfolio.allocate(selected, rd, cap_data)
+            weights_by_date[rd] = weights
+
+        if not all_symbols:
+            return {"error": "No stocks matched the filter criteria. Try relaxing conditions."}
+
+        price_data = get_daily_batch(list(all_symbols), start_fmt, end_fmt)
+
+        rebalance_set = set(rebalance_dates)
+        cash = float(self.initial_capital)
         holdings: dict[str, float] = {}
         records = []
-
-        rebalance_dates = pd.date_range(start_dt, end_dt, freq=self.rebalance_freq)
+        all_dates = sorted(set(d for df in price_data.values() for d in df.index))
+        last_prices: dict[str, float] = {}
 
         for date in all_dates:
-            if date in rebalance_dates:
-                selected = strategy.select(date, data)
-                weights = portfolio.allocate(selected, date, data)
-
+            date_str = date.strftime("%Y%m%d")
+            if date_str in rebalance_set and date_str in weights_by_date:
                 for s, shares in list(holdings.items()):
-                    if s in data and date in data[s].index:
-                        price = data[s].loc[date, "close"]
+                    price = self._get_price(s, date, price_data, last_prices)
+                    if price > 0:
                         cash += shares * price * (1 - self.commission_rate)
                 holdings.clear()
 
+                weights = weights_by_date[date_str]
                 for s, w in weights.items():
-                    if s in data and date in data[s].index:
-                        price = data[s].loc[date, "close"] * (1 + self.slippage)
-                        invest = cash * w
-                        shares = invest / price
-                        holdings[s] = shares
-                        cash -= invest * (1 + self.commission_rate)
+                    price = self._get_price(s, date, price_data, last_prices)
+                    if price <= 0:
+                        continue
+                    invest = cash * w
+                    shares = invest / (price * (1 + self.commission_rate))
+                    holdings[s] = shares
+                    cash -= invest
+
+                holdings_by_date[date_str] = {s: round(sh, 4) for s, sh in holdings.items()}
 
             total_value = cash
             for s, shares in holdings.items():
-                if s in data and date in data[s].index:
-                    total_value += shares * data[s].loc[date, "close"]
+                price = self._get_price(s, date, price_data, last_prices)
+                total_value += shares * price
 
-            records.append({"date": date, "portfolio_value": total_value, "cash": cash, "holdings": len(holdings)})
+            bm_val = 0
+            if not benchmark_df.empty and date in benchmark_df.index:
+                bm_val = benchmark_df.loc[date, "close"]
 
-        result = pd.DataFrame(records).set_index("date")
-        print(f"回测完成: {len(result)} 个交易日")
-        return result
+            records.append({
+                "date": date.strftime("%Y-%m-%d"),
+                "portfolio_value": round(total_value, 2),
+                "cash": round(cash, 2),
+                "holdings_count": len(holdings),
+                "benchmark_close": round(bm_val, 2) if bm_val else None,
+            })
+
+        result_df = pd.DataFrame(records)
+        return {
+            "records": records,
+            "holdings_by_date": holdings_by_date,
+            "weights_by_date": weights_by_date,
+            "total_trading_days": len(records),
+        }
+
+    @staticmethod
+    def _get_price(symbol: str, date, price_data: dict, last_prices: dict) -> float:
+        if symbol not in price_data:
+            return last_prices.get(symbol, 0)
+        df = price_data[symbol]
+        if date in df.index:
+            price = float(df.loc[date, "close"])
+            last_prices[symbol] = price
+            return price
+        return last_prices.get(symbol, 0)
+
+    def get_holdings_for_date(self, holdings_by_date: dict, date_str: str) -> list[dict]:
+        if date_str not in holdings_by_date:
+            sorted_dates = sorted(holdings_by_date.keys(), reverse=True)
+            for d in sorted_dates:
+                if d <= date_str:
+                    date_str = d
+                    break
+            else:
+                return []
+        ts_codes = list(holdings_by_date.get(date_str, {}).keys())
+        if not ts_codes:
+            return []
+        details = get_holdings_detail(ts_codes, date_str)
+        weights = {}
+        for d in details:
+            d["date"] = date_str
+            d["shares"] = holdings_by_date.get(date_str, {}).get(d.get("ts_code", ""), 0)
+        return details
