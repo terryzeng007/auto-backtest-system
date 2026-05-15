@@ -38,23 +38,31 @@ class BacktestEngine:
         if not rebalance_dates:
             return {"error": "No trading days found in range"}
 
-        benchmark_df = get_index_daily(
-            f"{self.benchmark_code}.SSE" if self.benchmark_code.startswith("0") else self.benchmark_code,
-            start_fmt, end_fmt
-        )
+        benchmark_code = self.benchmark_code
+        if "." not in benchmark_code:
+            if benchmark_code.startswith("0"):
+                benchmark_code = f"{benchmark_code}.SH"
+            else:
+                benchmark_code = f"{benchmark_code}.SZ"
+        benchmark_df = get_index_daily(benchmark_code, start_fmt, end_fmt)
         if benchmark_df.empty:
-            benchmark_df = get_index_daily(f"{self.benchmark_code}.SZSE", start_fmt, end_fmt)
+            alt = f"{self.benchmark_code}.SZ" if benchmark_code.endswith(".SH") else f"{self.benchmark_code}.SH"
+            benchmark_df = get_index_daily(alt, start_fmt, end_fmt)
 
         all_symbols = set()
         holdings_by_date: dict[str, dict] = {}
         weights_by_date: dict[str, dict] = {}
+        fund_cache: dict[str, pd.DataFrame] = {}
 
         for rd in rebalance_dates:
             selected = screen_stocks(filters, rd)
             if not selected:
                 continue
             all_symbols.update(selected)
-            fund_df = get_fundamental_all(rd)
+
+            if rd not in fund_cache:
+                fund_cache[rd] = get_fundamental_all(rd)
+            fund_df = fund_cache[rd]
             cap_data = {}
             if not fund_df.empty:
                 for _, row in fund_df[fund_df["ts_code"].isin(selected)].iterrows():
@@ -144,7 +152,6 @@ class BacktestEngine:
         if not ts_codes:
             return []
         details = get_holdings_detail(ts_codes, date_str)
-        weights = {}
         for d in details:
             d["date"] = date_str
             d["shares"] = holdings_by_date.get(date_str, {}).get(d.get("ts_code", ""), 0)

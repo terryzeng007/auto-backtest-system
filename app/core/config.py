@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).parent.parent / ".env")
+load_dotenv(Path(__file__).parent.parent.parent / ".env")
 
 TUSHARE_TOKEN = os.getenv("TUSHARE_TOKEN", "")
 VOLCENGINE_API_KEY = os.getenv("VOLCENGINE_API_KEY", "")

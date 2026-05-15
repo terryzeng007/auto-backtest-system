@@ -24,6 +24,9 @@ OP_MAP = {
 }
 
 
+MAX_STOCKS = 50
+
+
 def screen_stocks(filters: list[dict], trade_date: str) -> list[str]:
     if not filters:
         return []
@@ -45,7 +48,9 @@ def screen_stocks(filters: list[dict], trade_date: str) -> list[str]:
     if df.empty:
         return []
 
-    codes = df["ts_code"].tolist()
+    if "total_mv" in df.columns:
+        df = df.sort_values("total_mv", ascending=False)
+    codes = df["ts_code"].head(MAX_STOCKS).tolist()
     return codes
 
 
