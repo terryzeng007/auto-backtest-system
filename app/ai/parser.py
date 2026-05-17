@@ -93,16 +93,19 @@ def _rule_parse(question: str) -> dict | None:
         if kw in question and not any(f["field"] == field for f in filters):
             filters.append({"field": field, "op": ">", "value": 0})
 
-    rebalance = "M"
+    rebalance = "Q"
     for kw, freq in REBALANCE_MAP.items():
         if kw in question:
             rebalance = freq
             break
 
-    period_years = 5
+    period_years = 3
     year_match = re.search(r'(\d+)\s*年', question)
     if year_match:
         period_years = int(year_match.group(1))
+    month_match = re.search(r'(\d+)\s*个?月', question)
+    if month_match and not year_match:
+        period_years = max(1, int(month_match.group(1)) // 12 + 1)
 
     portfolio_method = "market_cap_weight"
     if "等权" in question:

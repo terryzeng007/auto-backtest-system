@@ -214,7 +214,7 @@ def h5_backtest():
         return jsonify(parsed), 400
 
     from datetime import datetime, timedelta
-    period = parsed.get("period_years", 5)
+    period = min(parsed.get("period_years", 3), 3)
     end_date = datetime.now().strftime("%Y-%m-%d")
     start_date = (datetime.now() - timedelta(days=period * 365)).strftime("%Y-%m-%d")
 
