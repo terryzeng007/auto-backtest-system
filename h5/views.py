@@ -1,10 +1,12 @@
-from flask import Blueprint, render_template_string, jsonify, request
+from flask import Blueprint, render_template_string, render_template, jsonify, request
+from pathlib import Path
 from app.ai.parser import parse_question
 from app.backtest.engine import BacktestEngine
 from app.report.stats import calc_stats, calc_radar_scores
 from app.data.questions import get_hot_questions, click_question
 
-h5_bp = Blueprint("h5", __name__)
+TEMPLATE_DIR = str(Path(__file__).parent / "templates")
+h5_bp = Blueprint("h5", __name__, template_folder=TEMPLATE_DIR)
 
 H5_TEMPLATE = """
 <!DOCTYPE html>
@@ -200,6 +202,11 @@ document.getElementById('question').addEventListener('keydown', function(e) {
 @h5_bp.route("/")
 def index():
     return render_template_string(H5_TEMPLATE)
+
+
+@h5_bp.route("/desktop")
+def desktop():
+    return render_template("desktop.html")
 
 
 @h5_bp.route("/h5/api/backtest", methods=["POST"])
